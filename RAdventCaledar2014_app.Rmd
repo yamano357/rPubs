@@ -1,0 +1,264 @@
+---
+title: "Rで3分キュレーション like WebApp"
+author: '@yamano357'
+date: "2014年12月4日"
+output:
+  html_document:
+    theme: readable
+runtime: shiny
+---
+
+[R Advent Calendar 2014](https://atnd.org/events/58648) 4日目の記事で書いた内容について、ドキュメントにshinyアプリを埋め込んだものです。  
+
+[アドベントカレンダー記事](http://rpubs.com/yamano357/46380)
+
+---
+
+各種パラメータは次の通りです。  
+・「クラスタ数」はWebブラウザに表示させる記事数  
+・「何年前まで？」は今日から何年前までの記事を表示対象にするか  
+・「検索クエリ」は投げるキーワード  
+（**＊入力中にEnterキーを押しすぎると、入力途中で検索が実行されるのでご注意ください**）  
+
+---
+
+```{r def.constant, echo = FALSE}
+kSetSentenceSep <- "\n" # 文の区切り
+kSetContentPOS <- c("名詞", "動詞", "形容詞", "副詞") # 内容語とする品詞
+kSetStopWord <- c("する", "ある", "なる", "いる", "こと", "れる") # 不要語扱いする内容語
+kSetSampling <- 100 # ブートストラップサンプリング数 
+kSetSleepTime <- 0.5 # ブラウザを開く際のスリープタイム（秒）
+```
+  
+```{r read.lib, echo = FALSE, include = FALSE}
+kSetLoadLibName <- c(
+  "stringr", "tm", "tm.plugin.webmining", "RMeCab",
+  "httr", "shiny",
+  "proxy", "kernlab"
+)
+is.road.lib <- suppressPackageStartupMessages(
+  sapply(kSetLoadLibName, library, character.only = TRUE, logical.return = TRUE)
+)
+stopifnot (is.road.lib)
+```
+
+```{r def.func, echo = FALSE}
+## 記号と名詞が多い文書は文字化けしていると定義
+## 形態素解析を2回実行することになるのが無駄だけど、今回はこの仕様で
+filterPageLogic <- function (content){
+  content.morph <- lapply(content, function (input) {
+    result <- try(RMeCabC(input, mypref = 1))
+    if (class(result) == "try-error") {
+      return (NULL) 
+    } else {
+      return (result)
+    }
+  })
+  filter.freq <- sapply(content.morph, function (morph.vec) {
+    morph <- names(unlist(morph.vec))
+    return (
+      list(
+        "sign" = sum(is.element(morph, "記号")),
+        "noun" = sum(is.element(morph, "名詞")),
+        "other" =   sum(!is.element(morph, c("名詞", "記号")))
+      )
+    )
+  })
+  return (unlist(filter.freq["other", ]) > 0)
+}
+
+exePriProcess <- function (content) {
+  return (
+    lapply(
+      strsplit(x = content, split = kSetSentenceSep),
+      function (each.content) {
+        return (
+          lapply(
+            each.content,
+            function (each.sentence) {
+              morph <- RMeCabC(each.sentence, mypref = 1)
+              is.content <- is.element(names(unlist(morph)), kSetContentPOS)
+              is.stop <- is.element(unlist(morph), kSetStopWord)
+              return (unlist(morph)[is.content & !is.stop])
+            }
+          )
+        )
+      }
+    )
+  )
+}
+
+calcCosineSim <- function (doc.term) {
+  return (
+    1 - as.matrix(
+      proxy::dist(x = as.matrix(
+        t(tm::TermDocumentMatrix(
+          x = tm::Corpus(x = tm::VectorSource(doc.term)), 
+          control = list(
+            removePunctuation = TRUE,
+            removeNumbers = TRUE,
+            tolower = TRUE
+          )
+        ))
+      ), method = "cosine")
+    )
+  )
+}
+
+calcHITS <- function (target.mat) {
+  hub <- abs(eigen(target.mat %*% t(target.mat))$vectors[, 1])
+  auth <- abs(eigen(t(target.mat) %*% target.mat)$vectors[, 1])
+  return (
+    list(
+      hub = hub / sum(hub),
+      auth = auth / sum(auth)
+    )
+  )
+}
+
+```
+
+```{r input.param, echo = FALSE}
+inputPanel(
+  numericInput(inputId = "clus.num", label = "クラスタ数", value = 5, min = 3, max = 10, step = 1),
+  numericInput(inputId = "prev.year", label = "何年前まで？", value = 1, min = 1, max = 3, step = 1),
+  textInput(inputId = "query", label = "検索クエリ（例：「初音ミク」）", value = ""),
+  
+  submitButton(text = "インスタント")
+)
+```
+
+---
+
+```{r render.part, echo = FALSE}
+query.count <- 0
+reactParam <- reactive({
+  return (
+    list(
+      query = input$query,
+      prev.year = input$prev.year,
+      clus.num = input$clus.num
+    )
+  )
+})
+
+renderPrint({
+  set.param <- reactParam()
+
+  set.query <- set.param$query
+  set.prev.year <- set.param$prev.year
+  set.clus.num <- set.param$clus.num
+
+  # 4文字は適当な数値
+  if (stringr::str_length(set.query) < 4) {
+    return ("もっと長い検索クエリを入力して欲しいです")
+  } else {
+
+    progress <- shiny::Progress$new()
+    on.exit(progress$close())
+    progress$set(message = paste(paste0("クエリ：", set.query), "処理中..."), value = 0)
+    
+    ## GoogleNewsからクエリにマッチするページ取得
+    ## API利用に変更するかも
+    progress$inc(amount = 0 / 5, detail = "ページ取得開始")
+    web.res <- WebCorpus(
+      GoogleNewsSource(
+        query = set.query, parame = list (hl = "ja", ie = "UTF-8")
+      )
+    )
+    
+    ## ページ情報を抽出
+    meta.info <- lapply(web.res, "[[", "meta")
+    url <- sapply(sapply(meta.info, "[[", "origin"), function (origin){
+      return (parse_url(origin)$query$url)
+    }, USE.NAMES = FALSE)
+    headline <- sapply(meta.info, "[[", "heading")
+    content <- sapply(web.res, "[[", "content")
+
+    ## 除外対象テキストかどうかを判定
+    progress$inc(amount = 1 / 5, detail = "ページフィルタ")
+    use.logic <- filterPageLogic(content)
+    date.logic <- sapply(lapply(meta.info, "[[", "datetimestamp"), as.character) >= (Sys.Date() - (365 * set.prev.year))
+    
+    ## 文字化けするページを除去（文字コード周りの処理は未実装）
+    url <- url[use.logic & date.logic]
+    content <- content[use.logic & date.logic]
+    headline <- headline[use.logic & date.logic]
+    
+    ## 形態素解析や内容語抽出、不要語除去
+    progress$inc(amount = 2 / 5, detail = "前処理開始")
+    content.morph <- exePriProcess(content) 
+    
+    ## テキスト間の類似度計算
+    progress$inc(amount = 3 / 5, detail = "類似度計算")
+    sim.mat <- calcCosineSim(content.morph)
+
+    ## クラスタリングして、ランキングアルゴリズムを適用して、スコアを確率としたブートストラップサンプリング。
+    ## 最大頻度のテキスト番号を取得
+    progress$inc(amount = 4 / 5, detail = "クラスタリング")
+    clus.res <- specc(x = sim.mat, centers = set.clus.num) @ .Data
+    clus.idx <- sapply(unique(clus.res), function (clus.num) {
+      clus.index <- which(clus.res == clus.num)
+      score <- calcHITS(sim.mat[clus.index, clus.index])$auth
+      return (
+        as.integer(
+          names(
+            which.max(
+              table(
+                sample(size = kSetSampling, x = clus.index, prob = score, replace = TRUE)
+              )
+            )
+          )
+        )
+      )
+    })
+    
+    ## クラスタごとに選ばれたURLを開く
+    progress$inc(amount = 5 / 5, detail = "Done")
+    for (open.u in url[clus.idx]) {
+      browseURL(open.u)
+      Sys.sleep(kSetSleepTime)
+    }
+    
+    return (headline[clus.idx])
+  }
+})
+```
+
+---
+
+---
+
+# 定数定義
+```{r express.def.constant, ref.label = "def.constant", echo = TRUE, eval = FALSE}
+```
+
+# パッケージ読み込み
+```{r express.read.lib, ref.label = "read.lib", echo = TRUE, eval = FALSE}
+```
+
+# 関数定義
+```{r express.def.func, ref.label = "def.func", echo = TRUE, eval = FALSE}
+```
+
+# Shiny入力部
+```{r express.input.param, ref.label = "input.param", echo = TRUE, eval = FALSE}
+```
+
+# Shiny処理部
+```{r express.render.part, ref.label = "render.part", echo = TRUE, eval = FALSE}
+```
+
+---
+
+---
+
+# 実行環境など
+
+```{r info}
+sessionInfo()
+```
+
+```{r date}
+Sys.Date()
+```
