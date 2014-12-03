@@ -1,0 +1,364 @@
+---
+title: "TokyoR#44 LT"
+author: '@yamano357'
+date: "2014年11月14日"
+output:
+  html_document:
+    fig_height: 7
+    fig_width: 9
+    theme: readable
+---
+
+---
+
+---
+
+## はじめに
+TokyoR#44でLT発表した内容について、可視化に使ったコードをメインにまとめ直した資料（＋おまけ）です。  
+- 当日の発表スライドは[こちら](https://speakerdeck.com/yamano357/tokyor44-lt)  
+
+スライドにも書きましたが、やった内容は次の通りです。  
+- TokyoRのイベントページからHTMLファイルをダウンロード  
+- ダウンロードしたHTMLファイルをパース  
+- 各回の開催ペースや参加者数を集計して可視化  
+
+以下はコードと可視化結果（あとデータポエム）です。
+
+---
+
+---
+
+## 設定・定義部
+### 各種定数の設定
+```{r const}
+kSetLoadLibName <- c("rvest", "dplyr", "tidyr", "ggvis", "Nippon", "d3Network", "igraph") # 読み込むパッケージ名
+kSetFreq <- 3 # 参加回数の下限値
+kSetLinkThreshold <- 0.7 # 類似度の閾値
+kSetTopN <- 50 # スコア上位Nまで出力
+kSetReadDir <- "/Users/yamano357/Desktop/TokyoR/"　# 読み込み対象ファイルを保存したディレクトリ
+## 抽出対象データのXPath
+kSetXPaths <- list(
+  event.title = list(
+    "XPath" = "//div[@id='events']/hgroup[@class='title clearfix']//a"
+  ),
+  member.max = list(
+    "XPath" = "//aside/section[@id='events-members']/div[@id='members-info']//span"
+  ),
+  members.join = list(
+    "XPath" = "//aside/section[@id='events-members']/section[@id='members-join']/ol[@class='a-b']/li/span/a"
+  ),
+  members.subjoin = list(
+    "XPath" = "//aside/section[@id='events-members']/section[@id='members-sub']//a"
+  ),
+  members.cancel = list(
+    "XPath" = "//aside/section[@id='events-members']/section[@id='members-cancel']//a"
+  )
+)
+```
+
+パッケージの読み込み
+```{r lib}
+is.road.lib <- suppressPackageStartupMessages(
+  sapply(kSetLoadLibName, library, character.only = TRUE, logical.return = TRUE)
+)
+stopifnot (any(is.road.lib))
+```
+
+---
+
+---
+
+## データ処理部
+```{r data.process}
+## 指定ディレクトリのファイルを読み込む
+## ただし、読み込むファイルの順と開催順が異なるので後で揃える
+list.files(path = kSetReadDir, full.names = TRUE)[seq(to = 3)] # ダウンロードしてきたHTMLファイルの一部
+source.htmls <- sapply(list.files(path = kSetReadDir, full.names = TRUE), rvest::html)
+
+## 開催日は属性値を絞り込みが異なるためベタ書きで処理
+held.date <- sapply(source.htmls, 
+                    function (source.html) {
+                      substr(
+                        (source.html %>% 
+                           html_nodes(xpath = "//div[@class='main']//dl[@class='clearfix']/dd/abbr") %>% 
+                           html_attr("title"))[[1]],
+                        start = 1, stop = 10
+                      )
+                    }
+)
+
+## 定義したXPathに基づきデータを抽出
+tokyo.r.member <- lapply(source.htmls,
+       function (source.html) {
+         lapply(kSetXPaths,
+                function (parse) {
+                  ## 抽出対象がない場合はNULLを返すように処理
+                  result <- try(
+                    source.html %>% html_nodes(xpath = parse$XPath) %>% html_text(),
+                    silent = TRUE
+                  )
+                  if (class(result) == "try-error") {
+                    return (NULL) 
+                  } else {
+                    return (result)
+                  }
+                }
+         )
+       }
+)
+
+## イベント名の整形
+event.title <- sapply(tokyo.r.member, "[[", "event.title")[order(held.date)]
+event.title <- substr(zen2han(event.title), start = 1, stop = regexpr("＠", event.title) - 1)
+
+## 読み込むファイルの順とイベント開催順を揃える
+tokyo.r.member <- tokyo.r.member[order(held.date)]
+names(tokyo.r.member) <- event.title
+
+title.count <- as.integer(substr(event.title, start = 2, stop = regexpr("R", event.title) - 2))
+```
+
+---
+
+---
+
+## プロット部
+###  開催スパン
+```{r held.pace.diff}
+data.frame(
+  span = factor(seq(length(title.count) - 1), labels = apply(embed(title.count, 2)[, c(2, 1)], 1, paste, collapse = " to ")),
+  diff = as.integer(diff(as.Date(sort(held.date), format = "%Y-%m-%d")))
+) %>% 
+  ggvis(x = ~span, y = ~diff) %>% layer_lines() %>%
+  add_axis("x", 
+           properties = axis_props(
+             labels = list(
+               angle = 90, fontSize = 10
+               )
+            )
+  )
+```
+
+### 開催ペース
+```{r held.pace.time}
+data.frame(
+  date = as.Date(sort(held.date), format = "%Y-%m-%d"),
+  title_count = title.count
+) %>%
+  ggvis(x = ~date, y = ~title_count) %>% layer_points()
+```
+
+> 開催スパンと開催ペースについて  
+> 開催スパンで見ると時おり開きがあるように見えるが、開催ペースで見るとスパンが空いている時期は年末（Japan.Rも影響？）とわかる  
+> それ以外は定期的に開催されている
+
+-----
+
+### 開催と参加状況
+```{r member.join}
+data.frame(
+  "title" = title.count,
+  "max" = sapply(sapply(tokyo.r.member, "[[", "member.max"), as.integer), # 定員
+  "join" = sapply(sapply(tokyo.r.member, "[[", "members.join"), length), # 参加者
+  "sub" = sapply(sapply(tokyo.r.member, "[[", "members.subjoin"), length), # 補欠者
+  "cancel" = sapply(sapply(tokyo.r.member, "[[", "members.cancel"), length) # キャンセル
+) %>% tidyr::gather(-title, key = type, value = value) %>%
+  ggvis(x = ~title, y = ~value, stroke = ~ type) %>% layer_lines()
+```
+
+> 開催と参加状況について  
+> 第25回（2012/08/04）過ぎたあたりから参加枠数が増えはじめ、以降補欠者が出るくらい人気に  
+> （詳しく見てないですが、「ビッグデータ」とか「データサイエンティスト」とかのトレンドと比較してみるのも面白いかもしれません。もしかしたら相互相関があるかも）  
+> 闇キャンセル（ステータス変更なしのキャンセル）の特定が難しかったので、考えないことに  
+> 懇親会の参加状況も見てみたかったけど、残念なことにデータがなかった  
+
+-----
+
+###  参加者ごとの回数のヒストグラム
+```{r join.hist, comment = NA}
+members.join <- unlist(sapply(tokyo.r.member, "[[", "members.join"))
+members.join.tab <- table(substr(names(members.join), start = 1, stop = regexpr("R", names(members.join)) - 1), members.join)
+members.join.count <- sort(colSums(members.join.tab))
+
+data.frame(
+  num = as.integer(names(table(members.join.count))),
+  freq = as.integer(table(members.join.count))
+) %>% 
+  ggvis(x = ~num, y = ~freq) %>% layer_bars()
+
+## 5回以上参加している方々に限定
+data.frame(
+  num = as.integer(names(table(members.join.count))),
+  freq = as.integer(table(members.join.count))
+) %>% dplyr::filter(num >= 5) %>%
+  ggvis(x = ~num, y = ~freq) %>% layer_bars()
+
+## 10回以上参加している方々を勝手に表示
+sort(members.join.count[members.join.count >= 10], decreasing = TRUE)
+```
+
+> 参加者ごとの回数のヒストグラム  
+> 参加者の名寄せをしていないので、もう少し頻度が多い方にスライドしそうではある  
+> （このアカウント同士が同一人物だという情報を希望）  
+> （少なくとも、とある方はふたりいらっしゃる）  
+
+-----
+
+### 参加者ネットワーク（同一の回に参加しているかどうかをベースに）
+```{r join.network, results = 'asis', comment = NA}
+## 下限値で参加者を絞り込み
+freq <- names(which(members.join.count >= kSetFreq))
+length(freq) # 絞り込まれた参加者数を表示
+members.join.tab <- members.join.tab[, is.element(colnames(members.join.tab), freq)]
+
+## 「参加者-参加回」の行列を作成して参加者間のコサイン類似度を算出
+## 類似度を求めるノード数が少なかったので、高速に処理できる行列演算で算出
+numerator <- crossprod(members.join.tab)
+denominator <- diag(numerator)
+cs <- numerator / sqrt(outer(denominator, denominator))
+diag(cs) <- 0 # 自ノードへのリンクはカット（対角成分は0に）
+
+## ノードはそのまま、リンクは指定した閾値で枝刈り
+node <- data.frame(name = colnames(cs))
+link <- data.frame(
+  to = as.integer(which(cs > kSetLinkThreshold, arr.ind = TRUE)[, 2]),
+  from = as.integer(which(cs > kSetLinkThreshold, arr.ind = TRUE)[, 1])
+)
+link <- data.frame(link, weight = cs[cs > kSetLinkThreshold])
+## D3は0オリジンなので1を引いておく
+link$from <- link$from - 1
+link$to <- link$to - 1 
+
+d3ForceNetwork(
+  Links = link, Nodes = node, 
+  Source = "from", Target = "to",
+  Value = "weight", NodeID = "name", 
+  linkDistance = 80, charge = -130,
+  width = 950, height = 1100,
+  parentElement = "div",
+  standAlone = TRUE, zoom = TRUE, 
+  iframe = FALSE, file = NULL
+)
+```
+
+-----
+
+## 参加者ネットワークのD3.jsによる力学モデルによる可視化
+- ノードをマウスオーバーすると参加者のアカウント名が表示  
+- スクロールするとズームし、ドラッグすると移動する（枠内に収まっていない方も表示可能）
+
+> 参加者ネットワークについて  
+> 「同一の回に参加しているかどうかをベースに」しているので、必ずしも仲が良い方たちが集まっているわけではありません（あしからず）  
+> ですので、リンクがないのは仲が悪いわけではありません（あしからず）  
+
+chunkのオプションに「results = "asis"」を指定してRPubs用のHTML内に出力  
+（[参考サイト](http://timelyportfolio.github.io/docs/_build/html/intro/share.html)では「comment = NA」も指定している）  
+
+chunkのオプションについては、[第七使徒様](http://d.hatena.ne.jp/teramonagi/20130615/1371303616)が既にまとめてらっしゃいます（さすがです）  
+
+-----
+
+### ネットワークスコア  
+D3で可視化した参加者のネットワークに用いた類似度を重み付きグラフとして、ランキングアルゴリズムを適用
+
+```{r join.score}
+## HITSアルゴリズムを適用
+auth <- eigen(t(cs) %*% cs)$vectors[, 1]
+auth <- auth / sum(auth)
+hub <- eigen(cs %*% t(cs))$vectors[, 1]
+hub <- hub / sum(hub)
+
+## 対称グラフなのでHUB値とAUTHORITY値が同じになるので、片方だけを使用
+## 指定した上位N人を表示
+names(auth) <- colnames(cs)
+sort(auth, decreasing = TRUE)[seq(to = kSetTopN)]
+```
+
+> ネットワークスコアについて  
+> いろいろな参加者とお会いしている方々がスコアが高くなるので、困った相談事をするとズバッと解決できる（かもしれません）  
+> 参加者の名寄せをしないで参加者同士の類似度を算出したので、同一人物の方々をまとめると結果が変わります（という風に書いている本人も昔は違うアカウントで登録していた経験あり）
+
+-----
+
+-----
+
+## おわりに
+
+手軽に使えないデータがないと嘆く人たちがいるけれど、ご長寿勉強会のデータが目の前にあるわけで、これに手を出さないわけがないと思いつきでやってみたLTでした。  
+
+TokyoRの参加者や開催時期などについて集計（分析ってなんだっけ？）してみたけれど、個人的には発表タイトル・発表者を分析して、どういう内容だと人が集まりやすいかを見てみたかったですが、データ構造が一定でなくて抽出を断念しました。  
+発表者と発表タイトルを対応付けたまま情報抽出するには、単純にテキストを抜き出すだけではできません。  
+必要な部分を同定し抽出する作業は、Webテキストから言語処理に必要不可欠な前処理と言えます。  
+いやはや、言語処理って難しいですね。  
+
+
+前処理が大変かもしれないけれど、その先に素晴らしい（かもしれない）言語処理に興味がある方は、こちらもどうぞ。  
+[NLP勉強会 #1](http://tokyoscrapper.connpass.com/event/9021/)
+
+第2回（NLP勉強会 #2）は2014年12月14日（日）を予定しております。  
+
+
+-----
+
+-----
+
+## おまけ
+### RPubsにアップ  
+RPubsにRStudio経由でアップロードしようとしたら、次のエラーが出てしまい公開できなかった（以前はWindows環境で支障なかった）。  
+```
+readBin(conn, what = "raw", n = contentLength) 
+```
+
+AWSに立てたRStudio環境からアップロードするという方法もよぎりましたが、根本解決にならないので、今回は却下。  
+ということで調べてみると、同じようなアップロードできない症状を出す人がちらほら。  
+
+https://support.rstudio.com/hc/communities/public/questions/202448223-Publish-to-rpubs-Error-in-readBin-conn-what-raw-n-contentLength-invalid-n-argument  
+https://support.rstudio.com/hc/communities/public/questions/203058566-Publishing-html-file  
+http://stackoverflow.com/questions/22537180/error-while-publishing-in-r-pubs  
+http://d.hatena.ne.jp/teramonagi/20141108/1415406127  
+
+まずは、もしかしたら環境の影響かもしれないとMacPortsも最新版(2.3.2)に移行して（Yosemiteにしたけれど古いままだった）、ついでにR(3.1.2に)とRStudio(0.98.1091に)のアップグレードしてみる。  
+
+次に、`R_HOME/etc/Rprofile.site`に下記のコマンドを記述。  
+```
+options(rpubs.upload.method = "internal")
+options(RCurlOptions = list(verbose = FALSE, capath = system.file("CurlSSL", "cacert.pem", package = "RCurl"), ssl.verifypeer = FALSE))
+```
+
+Macだったので環境変数R_HOMEは「/Library/Frameworks/R.framework/Resources」を`~/.bash_profile`に設定（書き換えた読み込んで確認しておこう）。  
+`export R_HOME=/Library/Frameworks/R.framework/Resources`  
+
+このようにしてRStudio経由で.RmdをHTML化してRPubsにアップロードしようとすると、今度は下記のエラーが発生。  
+
+```
+ 以下にエラー readResponse(conn, skipDecoding = FALSE) : 
+  Unexpected chunk length
+  Calls: rpubsUpload -> uploadFunction -> readResponse
+ 追加情報:  警告メッセージ: 
+ 強制変換により NA が生成されました  
+ 実行が停止されました 
+``` 
+
+下記の方法でアップロードを試してみると、今度はうまくいった（アップデートとか追記とかする前はダメだった）。
+
+```{r rpubs.memo, eval = FALSE}
+library(markdown)
+res <- rpubsUpload("TokyoR44_LT", "TokyoR_LT44.html")
+browseURL(res$continueUrl)
+```
+
+なお、themeを変えてHTMLを作成してrpubsUpload()関数を適用すると最初と同じエラーが発生したり、何度かrpubsUpload()関数を適用しているとアップロードされるという症状もありました（再現性がちょっと不明）。  
+
+何が問題の解消に繋がったのか、いまいちはっきりしなくて気持ち悪いですが、ひとつの教訓を得ました。  
+先駆者は偉大であると。  
+
+-----
+
+-----
+
+## 実行環境など
+本内容は個人の見解であり、所属する組織・団体の公式見解ではありません。
+```{r footer}
+sessionInfo()
+Sys.Date()
+```
