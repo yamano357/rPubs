@@ -1,0 +1,71 @@
+---
+title: "曜日順での集計に関するメモ書き"
+author: '@yamano357'
+date: "2014年12月23日"
+output: html_document
+---
+
+---
+
+## 概要  
+
+曜日順での集計をformat関数を使うとこういう書き方になるかな、というメモ書き。  
+間違えや、こうした方がいいよという意見があればお教えください。
+
+---
+
+```{r lib, message = FALSE}
+library(dplyr)
+```
+
+
+```{r def}
+x <- seq.Date(from = Sys.Date(), to = Sys.Date() + 31, by = "day")
+set.dayofweek.name <- paste0(c("日", "月", "火", "水", "木", "金", "土"), "曜日")
+```
+
+---
+
+- そのままだと曜日の順序通りに出てこない
+```{r default, comment = NA}
+table(format.Date(x = x, format = "%A"))
+```
+
+- "%u"をformat引数に指定して曜日順に出力する例
+```{r format_u, comment = NA}
+(x %>% format.Date(format = "%u") %>% as.integer() - 7) %>% abs() %>%
+  factor(labels = set.dayofweek.name) %>% table()
+```
+
+- "%A"をformat引数に指定して曜日順に出力する例
+```{r format_a, comment = NA}
+x %>% format.Date(format = "%A") %>% factor(levels = set.dayofweek.name) %>% table()
+```
+
+- "%A"をformat引数に指定する方が表示順を手軽に変えられていいかもしれません  
+(ただし、%Aや%aでの表示はロケール依存していて、避けた方がいい場合もあります)
+```{r format_a2, comment = NA}
+set.dayofweek.name <- paste0(c("土", "日", "月", "火", "水", "木", "金"), "曜日")
+x %>% format.Date(format = "%A") %>% factor(levels = set.dayofweek.name) %>% table()
+set.dayofweek.name <- paste0(c("土", "日", "水", "木", "月", "金", "火"), "曜日")
+x %>% format.Date(format = "%A") %>% factor(levels = set.dayofweek.name) %>% table()
+```
+
+---
+
+## 参考サイト
+
+元ネタ  
+http://blog.gepuro.net/archives/113
+
+format関数で指定できる引数の種類は、strftime関数のヘルプに記載されています。  
+http://www.inside-r.org/r-doc/base/strftime
+
+---
+
+```{r footer, comment = NA}
+sessionInfo()
+Sys.Date()
+
+```
+
