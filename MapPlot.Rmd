@@ -1,0 +1,140 @@
+---
+title: "Leaflet Plot Test"
+author: '@yamano357'
+date: "2014.07.15 Tue."
+output: html_document
+---
+
+
+## まえがき
+* 過去: ~~研究業務で~~カーネル密度マップをshinyで閲覧できる環境を作成
+* 過去: 地図にレイヤーを重ねるところをggmap()でやっており、インタラクティブ性が皆無だった
+
+* 現在: インタラクティブにやる方法を覚えるが、手軽に使えるデータがない => いい感じのオープンデータがあると知る（「http://rpubs.com/gg_hatano/22044」）
+* 現在: まずはインタラクティブにプロットするところから、ちょっと試してみよう（イマココ）
+
+
+## カーネル密度マップ
+* 位置情報を点じゃなくて「いいかんじにスムージングさせて」（カーネル密度推定）、地図にプロット（という感じだと思う）
+* 要は下記のようなプロットをしたい  
+*  交通事故発生マップ: http://www.keishicho.metro.tokyo.jp/toukei/jikomap/jikomap.htm
+*  カーネル密度推定法による密度地図作成: https://www.mapcom.co.jp/support/hint/vector/hint80.htm
+*  カーネル密度推定を用いた店舗情報の可視化: http://www.slideshare.net/KanetakaHeshiki/kde4-mcdonalds
+
+* ggmap()だとインタラクティブには難しい  
+* Contour and Density Layers with ggmap: http://www.r-bloggers.com/contour-and-density-layers-with-ggmap/
+* How to overlay point density (ggplot2) on OSM tile in R?: http://stackoverflow.com/questions/22850570/how-to-overlay-point-density-ggplot2-on-osm-tile-in-r
+
+* カーネル密度の説明は下記を参照  
+* カーネル密度推定@『捨てられたブログ』: http://blog.recyclebin.jp/archives/2145
+* Rで密度推定@『どんな鳥も』: http://d.hatena.ne.jp/tsutatsutatsuta/20120928/1348801089
+
+
+## データ処理部
+```{r, echo=TRUE}
+suppressPackageStartupMessages(library(shiny))
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(rMaps))
+suppressPackageStartupMessages(library(munsell))
+
+## サークルを描画させるgeo_jsonを出力する関数定義（塗りつぶす色を変えられるが、今回は未使用）
+MakeCircle <- function(longitude, latitude, fill.color) {
+  return(
+    lapply(seq(length(longitude)), function(i) {
+      return(
+        list(type = "Feature",
+             properties = list(
+               color = "black",
+               fillColor = mnsl(sprintf("5PB %d/10", fill.color[i]), fix = TRUE)
+             ),
+             geometry = list(
+               type = "Point", coordinates = c(longitude[i], latitude[i])
+             )
+          )
+      )
+    })
+  )
+}
+
+## データ整形用定数設定
+kSetHeaderName <- c("大分類", "小分類", "名称", "所在地", "緯度", "経度", "電話番号")
+kSetAlpHeaderName <- c("category1", "category2", "name", "address", "latitude", "longitude", "tel")
+kSetColorColName <- c("category2")
+
+## データ入力
+# 流山市オープンデータトライアルからデータ（公共施設所在地（公園））を取得
+# http://www.city.nagareyama.chiba.jp/10763/index.html
+parks <- data.table::fread(
+  input = "./data/shisetsu_kouen.csv", sep = ",", header = TRUE, 
+  select = kSetHeaderName
+  ) %>% as.data.frame()
+# 列の名前属性を日本語からアルファベットに変える
+colnames(parks) <- kSetAlpHeaderName
+```
+
+
+## Leafletを使って（rMapsパッケージを利用）プロット
+RMAPS: http://rmaps.github.io/  
+Leaflet: http://leafletjs.com/  
+
+```{r, echo = FALSE, results = 'asis', comment = NA}
+map <- Leaflet$new()
+center.loc <- parks %>% filter(str_detect(name, "平和台")) %>%
+  summarize(lon = mean(longitude), lat = mean(latitude))
+map$setView(c(center.loc$lat, center.loc$lon), zoom = 13)
+
+markers <- parks %>% filter(str_detect(name, "平和台")) %>%
+  mutate(color.class = dense_rank(category2)) %>%
+  with(., MakeCircle(longitude = longitude, latitude = latitude, fill.color = color.class))
+names(markers) <- NULL
+map$geoJson(markers, pointToLayer = "#! function (feature, latlng) {\n          return L.circleMarker(latlng, {\n      radius: 8,\n      color: feature.properties.color,\n      fillColor: feature.properties.fillColor,\n      weight: 1,\n      opacity: 1,\n      fillOpacity: 0.8\n  });\n      } !#")
+map$show('iframesrc', cdn = TRUE)
+```
+
+# 日本測地系と世界測地系
+* 提供データの測地系がわからなかったので、日本測地系から世界測地系に変換してみるが世界測地系で正しい気がする
+
+* 日本測地系と世界測地系: http://www.gsi.go.jp/LAW/G2000-g2000-h3.htm
+* Geocode Viewer: http://www.geosense.co.jp/map/tool/geoconverter.php
+* http://oshiete.goo.ne.jp/qa/7776927.html
+
+```{r, echo = TRUE, comment = NA}
+parks %>% filter(str_detect(name, "平和台")) %>% select(-category1, -category2, -tel) %>% 
+  mutate(
+    wsj_lat = latitude - (0.00010695 * latitude) + (0.000017464 * longitude) + 0.0046017,
+    wsj_lon = longitude - (0.000046038 * latitude) - (0.000083043 * longitude) + 0.010040
+    )
+```
+
+```{r, echo = FALSE, results = 'asis', comment = NA}
+map <- Leaflet$new()
+center.loc <- parks %>% filter(str_detect(name, "平和台")) %>%
+  mutate(
+    wsj_lat = latitude - (0.00010695 * latitude) + (0.000017464 * longitude) + 0.0046017,
+    wsj_lon = longitude - (0.000046038 * latitude) - (0.000083043 * longitude) + 0.010040
+    ) %>% 
+  summarize(lon = mean(wsj_lon), lat = mean(wsj_lat))
+map$setView(c(center.loc$lat, center.loc$lon), zoom = 13)
+
+markers <- parks %>% filter(str_detect(name, "平和台")) %>%
+    mutate(
+    wsj_lat = latitude - (0.00010695 * latitude) + (0.000017464 * longitude) + 0.0046017,
+    wsj_lon = longitude - (0.000046038 * latitude) - (0.000083043 * longitude) + 0.010040
+    ) %>%
+  mutate(color.class = dense_rank(category2)) %>%
+  with(., MakeCircle(longitude = wsj_lon, latitude = wsj_lat, fill.color = color.class))
+names(markers) <- NULL
+map$geoJson(markers, pointToLayer = "#! function (feature, latlng) {\n          return L.circleMarker(latlng, {\n      radius: 8,\n      color: feature.properties.color,\n      fillColor: feature.properties.fillColor,\n      weight: 1,\n      opacity: 1,\n      fillOpacity: 0.8\n  });\n      } !#")
+map$show('iframesrc', cdn = TRUE)
+```
+
+# あとがき
+* 未来: 点以外の情報を付加できるか試す
+* 未来: 他の公共施設のデータを追加してプロット
+* 未来: 他のオープンデータを追加してプロット
+* 未来: Shiny Appで公開
+* 未来: 元々の目的であるカーネル密度マップの作成
+
+
