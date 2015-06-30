@@ -1,7 +1,7 @@
 ---
 title: "Leaflet + Kernel Density Estimation"
 author: '@yamano357'
-date: "2015年6月29日"
+date: "2015年6月29日（2015年6月30日修正）"
 output:
   html_document:
     theme: readable
@@ -21,7 +21,7 @@ output:
 # 概要
 前書き
 - すでに記憶の彼方になっている[前回の](http://rpubs.com/yamano357/22098)の続き  
-- やったこと: Leafletにカーネル密度マップを重ねる
+- やったこと: Leafletにカーネル密度マップを重ねる  
 - 前回は{rMaps}を使っていたが、{leaflet}に移行（つい最近のリリースで、ラスターイメージの重ね書きが可能に）  
 　[Leaflet for R](http://rstudio.github.io/leaflet/)
 　[Raster Images](http://rstudio.github.io/leaflet/raster.html)
@@ -136,6 +136,7 @@ color_pal <- leaflet::colorNumeric(
 )
 
 leaflet::leaflet(width = 900) %>%
+  leaflet::addTiles() %>%
   leaflet::setView(lng = mean(location[, "lon"]), lat = mean(location[, "lat"]), zoom = 11) %>%
   leaflet::addRasterImage(x = loc_density_raster, opacity = 0.5, project = FALSE) %>%
   addLegend(pal = color_pal, values = values(loc_density_raster))
@@ -148,7 +149,8 @@ leaflet::leaflet(width = 900) %>%
 
 
 # 後書き
-- カーネル密度を{leaflet}に重ねてプロットしてみました。ラスターイメージの表示はできましたが、今度は{leaflet}による地図が出てこなくなりました。記事を書く前に試した際のデータでは地図の表示もできたので、できないというわけではなさそうです（もう少し調査します）。  
+- カーネル密度を{leaflet}に重ねてプロットしてみました。~~ラスターイメージの表示はできましたが、今度は{leaflet}による地図が出てこなくなりました。記事を書く前に試した際のデータでは地図の表示もできたので、できないというわけではなさそうです（もう少し調査します）。~~  
+-- ` leaflet::addTiles()`を付け忘れていただけでした。  
 
 - カーネル密度の計算ではバンド幅が重要になりますが、今回は適当な数値を設定したので、良い算出方法を調べたいです。  
 
